@@ -80,12 +80,14 @@ public class MainActivity extends Activity {
 
     private final ExecutorService io = Executors.newCachedThreadPool();
     private final Map<String, Peer> peers = new HashMap<>();
+    private final Map<String, SearchTask> searchTasks = new HashMap<>();
     private final String deviceId = UUID.randomUUID().toString();
     private final File storageRoot = Environment.getExternalStorageDirectory();
     private String deviceName;
     private Peer activePeer;
     private String activePath = "";
     private String activeSearch = "";
+    private String activeSearchTaskId = "";
     private WifiManager.MulticastLock multicastLock;
     private LinearLayout peerList;
     private LinearLayout fileList;
@@ -93,6 +95,7 @@ public class MainActivity extends Activity {
     private TextView title;
     private TextView localInfo;
     private TextView peerCount;
+    private TextView searchProgress;
     private EditText searchInput;
 
     @Override
@@ -162,6 +165,11 @@ public class MainActivity extends Activity {
         Button permission = primaryButton("打开所有文件访问权限");
         permission.setOnClickListener(v -> requestRuntimePermissions());
         local.addView(permission);
+        Button downloads = secondaryButton("Open Downloads");
+        downloads.setOnClickListener(v -> openDownloadsFolder());
+        LinearLayout.LayoutParams downloadsParams = new LinearLayout.LayoutParams(-1, -2);
+        downloadsParams.setMargins(0, dp(10), 0, 0);
+        local.addView(downloads, downloadsParams);
         root.addView(local);
 
         LinearLayout devices = panel();
@@ -205,6 +213,9 @@ public class MainActivity extends Activity {
         clearButtonParams.setMargins(dp(8), 0, 0, 0);
         searchRow.addView(clear, clearButtonParams);
         browser.addView(searchRow);
+        searchProgress = text("Search progress will appear here.", 13, MUTED, false);
+        searchProgress.setPadding(0, dp(8), 0, 0);
+        browser.addView(searchProgress);
 
         HorizontalScrollView crumbScroll = new HorizontalScrollView(this);
         breadcrumbs = row();
@@ -426,6 +437,8 @@ public class MainActivity extends Activity {
                 if ("/api/me".equals(url.path)) writeJson(s, 200, meJson());
                 else if ("/api/files".equals(url.path)) writeJson(s, 200, filesJson(url.query.get("path")));
                 else if ("/api/search".equals(url.path)) writeJson(s, 200, searchJson(url.query.get("q"), url.query.get("path")));
+                else if ("/api/search/start".equals(url.path)) writeJson(s, 200, startSearchJson(url.query.get("q"), url.query.get("path")));
+                else if ("/api/search/status".equals(url.path)) writeJson(s, 200, searchStatusJson(url.query.get("id")));
                 else if ("/api/download".equals(url.path)) writeFile(s, url.query.get("path"), true, headerValue(head.toString("UTF-8"), "Range"));
                 else if ("/api/preview".equals(url.path)) writeFile(s, url.query.get("path"), false, headerValue(head.toString("UTF-8"), "Range"));
                 else if ("/api/ping".equals(url.path)) writeJson(s, 200, new JSONObject().put("ok", true));
@@ -504,6 +517,100 @@ public class MainActivity extends Activity {
             .put("path", root.getAbsolutePath())
             .put("truncated", !stack.isEmpty())
             .put("entries", arr);
+    }
+
+    private JSONObject startSearchJson(String query, String rel) throws Exception {
+        if (!hasAllFilesAccess()) throw new IllegalArgumentException("All files access is required on Android.");
+        cleanupSearchTasks();
+        File root = safeFile(rel == null || rel.isEmpty() ? storageRoot.getAbsolutePath() : rel);
+        String id = UUID.randomUUID().toString();
+        SearchTask task = new SearchTask();
+        task.id = id;
+        task.query = query == null ? "" : query.trim();
+        task.needle = task.query.toLowerCase(Locale.ROOT);
+        task.root = root;
+        task.currentPath = root.getAbsolutePath();
+        task.startedAt = System.currentTimeMillis();
+        task.updatedAt = task.startedAt;
+        task.done = task.needle.isEmpty();
+        synchronized (searchTasks) {
+            searchTasks.put(id, task);
+        }
+        if (!task.done) io.execute(() -> runLocalSearchTask(id));
+        return searchTaskJson(task);
+    }
+
+    private JSONObject searchStatusJson(String id) throws Exception {
+        SearchTask task;
+        synchronized (searchTasks) {
+            task = searchTasks.get(id == null ? "" : id);
+        }
+        if (task == null) throw new IllegalArgumentException("Search task not found.");
+        return searchTaskJson(task);
+    }
+
+    private void runLocalSearchTask(String id) {
+        SearchTask task;
+        synchronized (searchTasks) {
+            task = searchTasks.get(id);
+        }
+        if (task == null) return;
+        List<File> stack = new ArrayList<>();
+        stack.add(task.root);
+        int maxVisited = 50000;
+        int maxResults = 250;
+        while (!stack.isEmpty() && task.entries.length() < maxResults && task.visited < maxVisited) {
+            File current = stack.remove(stack.size() - 1);
+            task.visited += 1;
+            task.currentPath = current.getAbsolutePath();
+            task.updatedAt = System.currentTimeMillis();
+            if (!current.canRead()) continue;
+            try {
+                if (current.getName().toLowerCase(Locale.ROOT).contains(task.needle)) {
+                    synchronized (task) {
+                        task.entries.put(fileJson(current));
+                    }
+                }
+            } catch (Exception ignored) {
+            }
+            if (!current.isDirectory()) continue;
+            File[] children = current.listFiles();
+            if (children == null) continue;
+            for (int i = children.length - 1; i >= 0; i--) {
+                stack.add(children[i]);
+            }
+        }
+        task.truncated = !stack.isEmpty();
+        task.done = true;
+        task.updatedAt = System.currentTimeMillis();
+    }
+
+    private JSONObject searchTaskJson(SearchTask task) throws Exception {
+        JSONArray entries;
+        synchronized (task) {
+            entries = new JSONArray(task.entries.toString());
+        }
+        return new JSONObject()
+            .put("id", task.id)
+            .put("query", task.query)
+            .put("path", task.root.getAbsolutePath())
+            .put("currentPath", task.currentPath)
+            .put("visited", task.visited)
+            .put("resultCount", entries.length())
+            .put("done", task.done)
+            .put("truncated", task.truncated)
+            .put("entries", entries);
+    }
+
+    private void cleanupSearchTasks() {
+        long cutoff = System.currentTimeMillis() - 10 * 60 * 1000;
+        synchronized (searchTasks) {
+            List<String> oldIds = new ArrayList<>();
+            for (Map.Entry<String, SearchTask> entry : searchTasks.entrySet()) {
+                if (entry.getValue().updatedAt < cutoff) oldIds.add(entry.getKey());
+            }
+            for (String id : oldIds) searchTasks.remove(id);
+        }
     }
 
     private JSONObject fileJson(File file) throws Exception {
@@ -609,7 +716,9 @@ public class MainActivity extends Activity {
                 activePeer = peer;
                 activePath = "";
                 activeSearch = "";
+                activeSearchTaskId = "";
                 if (searchInput != null) searchInput.setText("");
+                updateSearchProgress("Search progress will appear here.", false);
                 loadActiveFiles();
             });
             peerList.addView(button);
@@ -623,11 +732,15 @@ public class MainActivity extends Activity {
         }
         title.setText(activeSearch.isEmpty() ? (activePath.isEmpty() ? activePeer.name : new File(activePath).getName()) : "Search results");
         renderBreadcrumbs();
+        if (!activeSearch.isEmpty()) {
+            startRemoteSearch();
+            return;
+        }
+        activeSearchTaskId = "";
+        updateSearchProgress("Search progress will appear here.", false);
         io.execute(() -> {
             try {
-                String url = activeSearch.isEmpty()
-                    ? activePeer.url + "/api/files?path=" + URLEncoder.encode(activePath, "UTF-8")
-                    : activePeer.url + "/api/search?q=" + URLEncoder.encode(activeSearch, "UTF-8") + "&path=" + URLEncoder.encode(activePath, "UTF-8");
+                String url = activePeer.url + "/api/files?path=" + URLEncoder.encode(activePath, "UTF-8");
                 JSONObject json = fetchJson(url);
                 JSONArray entries = json.getJSONArray("entries");
                 boolean truncated = json.optBoolean("truncated", false);
@@ -652,13 +765,71 @@ public class MainActivity extends Activity {
             return;
         }
         activeSearch = query;
+        activeSearchTaskId = "";
         loadActiveFiles();
     }
 
     private void clearSearch() {
         activeSearch = "";
+        activeSearchTaskId = "";
         if (searchInput != null) searchInput.setText("");
+        updateSearchProgress("Search progress will appear here.", false);
         loadActiveFiles();
+    }
+
+    private void startRemoteSearch() {
+        updateSearchProgress("Starting search...", true);
+        io.execute(() -> {
+            try {
+                String url = activePeer.url + "/api/search/start?q=" + URLEncoder.encode(activeSearch, "UTF-8") + "&path=" + URLEncoder.encode(activePath, "UTF-8");
+                JSONObject json = fetchJson(url);
+                activeSearchTaskId = json.getString("id");
+                runOnUiThread(() -> renderSearchStatus(json));
+                if (!json.optBoolean("done", false)) pollRemoteSearch(activeSearchTaskId);
+            } catch (Exception e) {
+                runOnUiThread(() -> {
+                    updateSearchProgress("Search failed: " + e.getMessage(), false);
+                    renderEmpty("Search failed", e.getMessage());
+                });
+            }
+        });
+    }
+
+    private void pollRemoteSearch(String taskId) {
+        io.execute(() -> {
+            try {
+                Thread.sleep(450);
+                if (!taskId.equals(activeSearchTaskId) || activeSearch.isEmpty()) return;
+                String url = activePeer.url + "/api/search/status?id=" + URLEncoder.encode(taskId, "UTF-8");
+                JSONObject json = fetchJson(url);
+                runOnUiThread(() -> renderSearchStatus(json));
+                if (!json.optBoolean("done", false)) pollRemoteSearch(taskId);
+            } catch (Exception e) {
+                runOnUiThread(() -> updateSearchProgress("Search failed: " + e.getMessage(), false));
+            }
+        });
+    }
+
+    private void renderSearchStatus(JSONObject json) {
+        try {
+            JSONArray entries = json.getJSONArray("entries");
+            renderFiles(entries);
+            int visited = json.optInt("visited", 0);
+            int count = json.optInt("resultCount", entries.length());
+            boolean done = json.optBoolean("done", false);
+            boolean truncated = json.optBoolean("truncated", false);
+            String message = (done ? "Search complete" : "Searching") + " · scanned " + visited + " · found " + count;
+            if (truncated) message += " · result limit reached";
+            updateSearchProgress(message, !done);
+        } catch (Exception e) {
+            updateSearchProgress("Search failed: " + e.getMessage(), false);
+        }
+    }
+
+    private void updateSearchProgress(String message, boolean active) {
+        if (searchProgress == null) return;
+        searchProgress.setText(message);
+        searchProgress.setTextColor(active ? TEAL : MUTED);
     }
 
     private JSONObject fetchJson(String spec) throws Exception {
@@ -683,7 +854,9 @@ public class MainActivity extends Activity {
         Button root = secondaryButton(activePeer.name);
         root.setOnClickListener(v -> {
             activeSearch = "";
+            activeSearchTaskId = "";
             if (searchInput != null) searchInput.setText("");
+            updateSearchProgress("Search progress will appear here.", false);
             activePath = "";
             loadActiveFiles();
         });
@@ -704,6 +877,7 @@ public class MainActivity extends Activity {
                 String target = item.getPath();
                 crumb.setOnClickListener(v -> {
                     activePath = target;
+                    activeSearchTaskId = "";
                     loadActiveFiles();
                 });
                 breadcrumbs.addView(crumb);
@@ -749,7 +923,9 @@ public class MainActivity extends Activity {
                 if (type.equals("folder")) {
                     activePath = item.getString("path");
                     activeSearch = "";
+                    activeSearchTaskId = "";
                     if (searchInput != null) searchInput.setText("");
+                    updateSearchProgress("Search progress will appear here.", false);
                     loadActiveFiles();
                 } else if (!media.isEmpty()) {
                     openViewer(item);
@@ -899,6 +1075,23 @@ public class MainActivity extends Activity {
         toast("已开始提取到 Downloads/LanFileBridge");
     }
 
+    private void openDownloadsFolder() {
+        try {
+            File folder = new File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "LanFileBridge");
+            if (!folder.exists()) folder.mkdirs();
+            Intent intent = new Intent(Intent.ACTION_VIEW);
+            intent.setDataAndType(Uri.fromFile(folder), "resource/folder");
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(intent);
+        } catch (Exception first) {
+            try {
+                startActivity(new Intent(DownloadManager.ACTION_VIEW_DOWNLOADS));
+            } catch (Exception second) {
+                toast("Open Downloads/LanFileBridge from the system file manager.");
+            }
+        }
+    }
+
     private String localIp() {
         try {
             Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
@@ -952,6 +1145,20 @@ public class MainActivity extends Activity {
         int port;
         String url;
         long seenAt;
+    }
+
+    private static class SearchTask {
+        String id;
+        String query;
+        String needle;
+        File root;
+        String currentPath;
+        JSONArray entries = new JSONArray();
+        int visited;
+        boolean done;
+        boolean truncated;
+        long startedAt;
+        long updatedAt;
     }
 
     private static class URLParts {

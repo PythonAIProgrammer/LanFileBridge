@@ -11,6 +11,7 @@ const DISCOVERY_PORT = Number(process.env.LAN_BRIDGE_DISCOVERY_PORT || 4318);
 const DEVICE_ID = process.env.LAN_BRIDGE_ID || crypto.randomUUID();
 const DEVICE_NAME = process.env.LAN_BRIDGE_NAME || `${os.hostname()} PC`;
 const peers = new Map();
+const searchTasks = new Map();
 
 function now() {
   return Date.now();
@@ -193,6 +194,105 @@ function searchFiles(query, startPath) {
   return { query, path: startPath || "", truncated: stack.length > 0, entries };
 }
 
+function createSearchTask(query, startPath) {
+  const needle = String(query || "").trim().toLowerCase();
+  if (!needle) throw new Error("Search query is required.");
+  const id = crypto.randomUUID();
+  const task = {
+    id,
+    query: String(query || "").trim(),
+    path: startPath || "",
+    needle,
+    stack: startPath ? [safePath(startPath)] : rootEntries().map((entry) => entry.path),
+    entries: [],
+    visited: 0,
+    done: false,
+    truncated: false,
+    error: "",
+    startedAt: now(),
+    updatedAt: now(),
+    maxResults: 250,
+    maxVisited: 50000
+  };
+  searchTasks.set(id, task);
+  setImmediate(() => runSearchTask(id));
+  return publicSearchTask(task);
+}
+
+function runSearchTask(id) {
+  const task = searchTasks.get(id);
+  if (!task || task.done) return;
+  const batchSize = 300;
+  let processed = 0;
+  try {
+    while (task.stack.length && task.entries.length < task.maxResults && task.visited < task.maxVisited && processed < batchSize) {
+      const current = task.stack.pop();
+      processed += 1;
+      task.visited += 1;
+      let stat;
+      try {
+        stat = fs.lstatSync(current);
+        if (stat.isSymbolicLink()) continue;
+      } catch {
+        continue;
+      }
+
+      const name = path.basename(current) || current;
+      if (name.toLowerCase().includes(task.needle)) {
+        try {
+          task.entries.push(statToEntry(current, current));
+        } catch {
+          // Skip unreadable matches.
+        }
+      }
+
+      if (!stat.isDirectory()) continue;
+      let children;
+      try {
+        children = fs.readdirSync(current);
+      } catch {
+        continue;
+      }
+      for (let i = children.length - 1; i >= 0; i -= 1) {
+        task.stack.push(path.join(current, children[i]));
+      }
+    }
+
+    task.updatedAt = now();
+    if (!task.stack.length || task.entries.length >= task.maxResults || task.visited >= task.maxVisited) {
+      task.done = true;
+      task.truncated = task.stack.length > 0;
+    } else {
+      setTimeout(() => runSearchTask(id), 20);
+    }
+  } catch (error) {
+    task.done = true;
+    task.error = error.message;
+    task.updatedAt = now();
+  }
+}
+
+function publicSearchTask(task) {
+  return {
+    id: task.id,
+    query: task.query,
+    path: task.path,
+    visited: task.visited,
+    resultCount: task.entries.length,
+    done: task.done,
+    truncated: task.truncated,
+    error: task.error,
+    entries: task.entries
+  };
+}
+
+function cleanupSearchTasks() {
+  const cutoff = now() - 10 * 60 * 1000;
+  for (const [id, task] of searchTasks) {
+    if (task.updatedAt < cutoff) searchTasks.delete(id);
+  }
+}
+
 function mimeType(filePath) {
   const ext = path.extname(filePath).toLowerCase();
   return {
@@ -335,6 +435,27 @@ async function handleApi(req, res, url) {
       json(res, 200, searchFiles(url.searchParams.get("q") || "", url.searchParams.get("path") || ""));
     } catch (error) {
       json(res, 400, { error: error.message });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/search/start") {
+    try {
+      cleanupSearchTasks();
+      json(res, 200, createSearchTask(url.searchParams.get("q") || "", url.searchParams.get("path") || ""));
+    } catch (error) {
+      json(res, 400, { error: error.message });
+    }
+    return;
+  }
+
+  if (url.pathname === "/api/search/status") {
+    const id = url.searchParams.get("id") || "";
+    const task = searchTasks.get(id);
+    if (!task) {
+      json(res, 404, { error: "Search task not found." });
+    } else {
+      json(res, 200, publicSearchTask(task));
     }
     return;
   }

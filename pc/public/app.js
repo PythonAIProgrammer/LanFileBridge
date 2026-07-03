@@ -1,4 +1,12 @@
-const state = { me: null, peers: [], active: null, path: "", search: "" };
+const state = {
+  me: null,
+  peers: [],
+  active: null,
+  path: "",
+  search: "",
+  searchTaskId: "",
+  searchTimer: null
+};
 
 const $ = (id) => document.getElementById(id);
 const peerList = $("peerList");
@@ -10,6 +18,7 @@ const viewerBody = $("viewerBody");
 const viewerTitle = $("viewerTitle");
 const viewerDownload = $("viewerDownload");
 const searchInput = $("searchInput");
+const searchProgress = $("searchProgress");
 
 function showToast(message) {
   toast.textContent = message;
@@ -20,7 +29,11 @@ function showToast(message) {
 
 function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, (char) => ({
-    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;"
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    '"': "&quot;",
+    "'": "&#039;"
   }[char]));
 }
 
@@ -57,6 +70,17 @@ async function getJson(url, options) {
   return data;
 }
 
+function setSearchProgress(message, active = false) {
+  searchProgress.textContent = message;
+  searchProgress.classList.toggle("active", active);
+}
+
+function stopSearchPolling() {
+  if (state.searchTimer) clearInterval(state.searchTimer);
+  state.searchTimer = null;
+  state.searchTaskId = "";
+}
+
 async function loadMe() {
   state.me = await getJson("/api/me");
   $("deviceName").textContent = state.me.name;
@@ -76,6 +100,7 @@ function renderPeers() {
     peerList.innerHTML = `<div class="empty-state"><p>No devices found</p></div>`;
     return;
   }
+
   peerList.innerHTML = "";
   for (const peer of state.peers) {
     const item = document.createElement("button");
@@ -91,7 +116,9 @@ function renderPeers() {
       state.active = peer;
       state.path = "";
       state.search = "";
+      stopSearchPolling();
       searchInput.value = "";
+      setSearchProgress("Search progress will appear here.");
       renderPeers();
       loadFiles();
     });
@@ -107,8 +134,10 @@ function renderBreadcrumbs() {
   root.textContent = state.search ? `Search: ${state.search}` : state.active.name;
   root.addEventListener("click", () => {
     state.search = "";
+    stopSearchPolling();
     searchInput.value = "";
     state.path = "";
+    setSearchProgress("Search progress will appear here.");
     loadFiles();
   });
   breadcrumbs.appendChild(root);
@@ -144,14 +173,14 @@ function renderEmpty(title, message) {
 
 function previewMarkup(entry) {
   if (entry.media === "image") return `<img class="thumb-media" src="${remoteUrl("/api/preview", entry)}" alt="">`;
-  if (entry.media === "video") return `<video class="thumb-media" src="${remoteUrl("/api/preview", entry)}" preload="metadata" muted playsinline></video><span class="play-badge">▶</span>`;
+  if (entry.media === "video") return `<video class="thumb-media" src="${remoteUrl("/api/preview", entry)}" preload="metadata" muted playsinline></video><span class="play-badge">PLAY</span>`;
   return `<div class="file-icon">${iconText(entry)}</div>`;
 }
 
 function renderFiles(entries) {
   fileGrid.className = entries.length ? "file-grid" : "file-grid empty";
   if (!entries.length) {
-    renderEmpty(state.search ? "No matches" : "This location is empty", state.search ? "Try another keyword." : "Try another folder.");
+    renderEmpty(state.search ? "No matches" : "This location is empty", state.search ? "Try another keyword. Folder matches are included." : "Try another folder.");
     return;
   }
   fileGrid.innerHTML = "";
@@ -182,7 +211,9 @@ function openEntry(entry) {
   if (entry.type === "folder") {
     state.path = entry.path;
     state.search = "";
+    stopSearchPolling();
     searchInput.value = "";
+    setSearchProgress("Search progress will appear here.");
     loadFiles();
     return;
   }
@@ -218,15 +249,11 @@ async function loadFiles() {
     renderBreadcrumbs();
     return;
   }
-  $("activeTitle").textContent = state.search ? `Search results` : (state.path ? state.path.split(/[\\/]/).filter(Boolean).at(-1) || state.path : state.active.name);
+  $("activeTitle").textContent = state.search ? "Search results" : (state.path ? state.path.split(/[\\/]/).filter(Boolean).at(-1) || state.path : state.active.name);
   renderBreadcrumbs();
   try {
-    const url = state.search
-      ? `${state.active.url}/api/search?q=${encodeURIComponent(state.search)}&path=${encodeURIComponent(state.path)}`
-      : `${state.active.url}/api/files?path=${encodeURIComponent(state.path)}`;
-    const data = await getJson(url);
+    const data = await getJson(`${state.active.url}/api/files?path=${encodeURIComponent(state.path)}`);
     renderFiles(data.entries);
-    if (data.truncated) showToast("Search stopped after the result limit.");
   } catch (error) {
     renderEmpty("Unable to read files", error.message);
   }
@@ -243,12 +270,56 @@ function runSearch() {
     return;
   }
   state.search = query;
-  loadFiles();
+  startSearchTask();
+}
+
+async function startSearchTask() {
+  stopSearchPolling();
+  $("activeTitle").textContent = "Search results";
+  renderBreadcrumbs();
+  renderEmpty("Searching", "Scanning accessible folders on the selected device.");
+  setSearchProgress("Starting search...", true);
+  try {
+    const data = await getJson(`${state.active.url}/api/search/start?q=${encodeURIComponent(state.search)}&path=${encodeURIComponent(state.path)}`);
+    state.searchTaskId = data.id;
+    handleSearchStatus(data);
+    if (!data.done && state.searchTaskId) state.searchTimer = setInterval(pollSearchStatus, 600);
+  } catch (error) {
+    setSearchProgress(`Search failed: ${error.message}`);
+    renderEmpty("Search failed", error.message);
+  }
+}
+
+async function pollSearchStatus() {
+  if (!state.searchTaskId || !state.active) return;
+  try {
+    const data = await getJson(`${state.active.url}/api/search/status?id=${encodeURIComponent(state.searchTaskId)}`);
+    handleSearchStatus(data);
+  } catch (error) {
+    stopSearchPolling();
+    setSearchProgress(`Search failed: ${error.message}`);
+  }
+}
+
+function handleSearchStatus(data) {
+  renderBreadcrumbs();
+  renderFiles(data.entries || []);
+  const status = data.done ? "Done" : "Searching";
+  const suffix = data.truncated ? " Result limit reached." : "";
+  setSearchProgress(`${status}: scanned ${data.visited} items, found ${data.resultCount} matches.${suffix}`, !data.done);
+  if (data.error) {
+    stopSearchPolling();
+    setSearchProgress(`Search failed: ${data.error}`);
+  } else if (data.done) {
+    stopSearchPolling();
+  }
 }
 
 function clearSearch() {
   state.search = "";
+  stopSearchPolling();
   searchInput.value = "";
+  setSearchProgress("Search progress will appear here.");
   loadFiles();
 }
 

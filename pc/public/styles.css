@@ -271,6 +271,18 @@ input {
   min-height: 44px;
 }
 
+.search-progress {
+  min-height: 24px;
+  margin: -6px 0 14px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.search-progress.active {
+  color: var(--teal);
+  font-weight: 700;
+}
+
 .ghost-button {
   color: var(--ink);
   background: white;

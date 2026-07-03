@@ -1,8 +1,22 @@
 $ErrorActionPreference = "Stop"
 
 $ProjectRoot = $PSScriptRoot
-$WorkspaceRoot = Resolve-Path (Join-Path $ProjectRoot "..\..\..")
-$SdkRoot = Join-Path $WorkspaceRoot "work\android-sdk"
+$RepoRoot = Resolve-Path (Join-Path $ProjectRoot "..")
+$SdkRoot = ""
+$Probe = (Resolve-Path $ProjectRoot).Path
+while ($Probe) {
+  $Candidate = Join-Path $Probe "work\android-sdk"
+  if (Test-Path (Join-Path $Candidate "platforms\android-35\android.jar")) {
+    $SdkRoot = $Candidate
+    break
+  }
+  $Parent = Split-Path $Probe -Parent
+  if ($Parent -eq $Probe) { break }
+  $Probe = $Parent
+}
+if (-not $SdkRoot) {
+  throw "Android SDK not found. Expected a work\android-sdk folder in this repo or one of its parent folders."
+}
 $BuildTools = Join-Path $SdkRoot "build-tools\35.0.0"
 $AndroidJar = Join-Path $SdkRoot "platforms\android-35\android.jar"
 $Jdk = "C:\Program Files\JetBrains\PyCharm 2025.1.3\jbr"
@@ -13,7 +27,8 @@ $Out = Join-Path $ProjectRoot "manual-build"
 $Package = "com.lanbridge.app"
 $Unsigned = Join-Path $Out "LanFileBridge-unsigned.apk"
 $Aligned = Join-Path $Out "LanFileBridge-aligned.apk"
-$Signed = Join-Path $WorkspaceRoot "outputs\LanFileBridge-android-debug.apk"
+$Dist = Join-Path $RepoRoot "dist"
+$Signed = Join-Path $Dist "LanFileBridge-android-debug.apk"
 $Keystore = Join-Path $Out "debug.keystore"
 $LocalAndroidJar = Join-Path $Out "android.jar"
 Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -30,6 +45,7 @@ function Invoke-Checked {
 }
 
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
+New-Item -ItemType Directory -Force -Path $Dist | Out-Null
 $CompiledResDir = Join-Path $Out "compiled-res"
 $ClassesDir = Join-Path $Out "classes"
 $DexDir = Join-Path $Out "dex"
