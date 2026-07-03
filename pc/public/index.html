@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>LanFileBridge PC</title>
+    <link rel="stylesheet" href="styles.css">
+  </head>
+  <body>
+    <main class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="mark">L</div>
+          <div>
+            <h1>LanFileBridge</h1>
+            <p>Local network file bridge</p>
+          </div>
+        </div>
+
+        <section class="panel device-panel">
+          <div class="panel-title">
+            <span>This Device</span>
+            <strong id="localStatus">Starting</strong>
+          </div>
+          <div class="machine">
+            <div class="machine-icon pc">PC</div>
+            <div>
+              <h2 id="deviceName">Loading</h2>
+              <p id="deviceUrl">-</p>
+            </div>
+          </div>
+          <p class="scope-note">Sharing all accessible local file locations</p>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">
+            <span>Online Devices</span>
+            <strong id="peerCount">0</strong>
+          </div>
+          <div id="peerList" class="peer-list"></div>
+        </section>
+      </aside>
+
+      <section class="workspace">
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">Nearby Files</p>
+            <h2 id="activeTitle">Choose a device</h2>
+          </div>
+          <div class="actions">
+            <button id="upButton" class="icon-button" title="Go up">↑</button>
+            <button id="refreshButton">Refresh</button>
+          </div>
+        </header>
+
+        <section class="search-strip">
+          <input id="searchInput" type="search" placeholder="Search files on the selected device">
+          <button id="searchButton">Search</button>
+          <button id="clearSearchButton" class="ghost-button">Clear</button>
+        </section>
+
+        <section class="hero">
+          <div class="hero-copy">
+            <h3>Preview photos and videos before downloading.</h3>
+            <p>Browse, search, preview, stream, and transfer files directly over your local network.</p>
+          </div>
+          <div class="signal">
+            <span></span><span></span><span></span>
+          </div>
+        </section>
+
+        <nav id="breadcrumbs" class="breadcrumbs"></nav>
+
+        <section id="fileGrid" class="file-grid empty">
+          <div class="empty-state">
+            <div class="empty-icon">~</div>
+            <h3>Waiting for devices</h3>
+            <p>Keep the PC and Android device on the same local network.</p>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <div id="viewer" class="viewer" aria-hidden="true">
+      <div class="viewer-bar">
+        <strong id="viewerTitle">Preview</strong>
+        <div>
+          <a id="viewerDownload" class="viewer-download" href="#" download>Download</a>
+          <button id="viewerClose" class="icon-button" title="Close">x</button>
+        </div>
+      </div>
+      <div id="viewerBody" class="viewer-body"></div>
+    </div>
+    <div id="toast" class="toast"></div>
+    <script src="app.js"></script>
+  </body>
+</html>

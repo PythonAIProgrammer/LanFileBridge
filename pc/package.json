@@ -1,0 +1,16 @@
+{
+  "name": "lan-file-bridge-pc",
+  "version": "1.0.0",
+  "description": "PC side of LanFileBridge, a local-network file sharing and discovery app.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [
+    "lan",
+    "file-sharing",
+    "local-network"
+  ],
+  "author": "",
+  "license": "MIT"
+}
